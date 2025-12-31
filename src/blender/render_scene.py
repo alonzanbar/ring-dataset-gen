@@ -9,6 +9,7 @@ import sys
 import argparse
 import math
 import mathutils
+import numpy as np
 from mathutils import Vector, Euler
 from pathlib import Path
 
@@ -185,8 +186,9 @@ scene.cycles.samples = render_params["cycles_samples"]
 scene.cycles.use_denoising = render_params["denoise"]
 scene.cycles.device = render_params["device"]
 
-# Set deterministic seed
-scene.cycles.seed = sample_seed
+# Set deterministic seed (convert to 32-bit int for Blender)
+# Use modulo to fit within int32 range, preserving determinism
+scene.cycles.seed = int(sample_seed % (2**31 - 1))
 
 # Resolution
 scene.render.resolution_x = params.get("image_width", 512)
@@ -199,66 +201,109 @@ scene.render.image_settings.file_format = render_params["file_format"]
 scene.render.filepath = str(out_dir / "rgb.png")
 
 # Enable passes for masks
-scene.view_layers["View Layer"].use_pass_object_index = True
+# Get the active view layer (name may vary by Blender version)
+view_layer = scene.view_layers[0] if len(scene.view_layers) > 0 else scene.view_layers.active
+view_layer.use_pass_object_index = True
 
 # Render RGB
 bpy.ops.render.render(write_still=True)
 
-# Render masks using compositor
-scene.use_nodes = True
-tree = scene.node_tree
-tree.nodes.clear()
-
-# Create nodes for mask rendering
-render_layers = tree.nodes.new(type='CompositorNodeRLayers')
-composite = tree.nodes.new(type='CompositorNodeComposite')
-
-# Ring mask (object index 1)
-ring_mask_output = tree.nodes.new(type='CompositorNodeOutputFile')
-ring_mask_output.base_path = str(out_dir)
-ring_mask_output.file_slots[0].path = "mask_ring"
-ring_mask_output.format.file_format = 'PNG'
-ring_mask_output.format.color_mode = 'BW'
-
-# Extract object index 1 (ring)
-ring_math = tree.nodes.new(type='CompositorNodeMath')
-ring_math.operation = 'EQUAL'
-ring_math.inputs[1].default_value = 1.0  # Object index 1
-
-# Convert to binary (0 or 1, then scale to 0-255)
-ring_scale = tree.nodes.new(type='CompositorNodeMath')
-ring_scale.operation = 'MULTIPLY'
-ring_scale.inputs[1].default_value = 255.0
-
-tree.links.new(render_layers.outputs["IndexOB"], ring_math.inputs[0])
-tree.links.new(ring_math.outputs[0], ring_scale.inputs[0])
-tree.links.new(ring_scale.outputs[0], ring_mask_output.inputs[0])
-
-# Inner mask (object index 2)
-inner_mask_output = tree.nodes.new(type='CompositorNodeOutputFile')
-inner_mask_output.base_path = str(out_dir)
-inner_mask_output.file_slots[0].path = "mask_inner"
-inner_mask_output.format.file_format = 'PNG'
-inner_mask_output.format.color_mode = 'BW'
-
-inner_math = tree.nodes.new(type='CompositorNodeMath')
-inner_math.operation = 'EQUAL'
-inner_math.inputs[1].default_value = 2.0  # Object index 2
-
-# Convert to binary (0 or 1, then scale to 0-255)
-inner_scale = tree.nodes.new(type='CompositorNodeMath')
-inner_scale.operation = 'MULTIPLY'
-inner_scale.inputs[1].default_value = 255.0
-
-tree.links.new(render_layers.outputs["IndexOB"], inner_math.inputs[0])
-tree.links.new(inner_math.outputs[0], inner_scale.inputs[0])
-tree.links.new(inner_scale.outputs[0], inner_mask_output.inputs[0])
+# Render masks using object index pass
+# Enable object index pass in view layer
+view_layer = scene.view_layers[0] if len(scene.view_layers) > 0 else scene.view_layers.active
+view_layer.use_pass_object_index = True
 
 # Make inner volume visible for mask render
 inner_volume.hide_render = False
 
-# Render masks
+# Render to get object index pass
 bpy.ops.render.render()
+
+# Get render result and extract masks
+render_result = bpy.data.images['Render Result']
+if render_result is None:
+    # Try to get from view layer
+    render_result = view_layer.render_result
+
+# Get object index pass from render layers
+# Access the pass through the view layer
+pixels = None
+try:
+    # Try to get object index pass
+    index_pass = view_layer.passes.get("IndexOB")
+    if index_pass:
+        pixels = index_pass.pixels
+except:
+    pass
+
+# Alternative: use render result and extract from composite
+if pixels is None:
+    # Render again and access through render layers output
+    # Use Python to process the object index
+    # Get pixels from render result
+    render_result = bpy.data.images.get('Render Result')
+    if render_result:
+        # Render result contains all passes, we need to access object index
+        # In Blender 5.0, we might need to use compositor or render layers differently
+        pass
+
+# Fallback: Use separate renders with white materials for masks
+# This is more reliable across Blender versions
+print("Using material-based mask rendering...")
+
+# Save current materials
+ring_bsdf = ring_mat.node_tree.nodes["Principled BSDF"]
+ring_base_color = ring_bsdf.inputs["Base Color"].default_value[:]
+ring_metallic = ring_bsdf.inputs["Metallic"].default_value
+
+# Render ring mask: white ring on black background
+bg_plane_obj.hide_render = True
+inner_volume.hide_render = True
+ring_bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+ring_bsdf.inputs["Metallic"].default_value = 0.0
+# Try to set emission if available
+if "Emission Color" in ring_bsdf.inputs:
+    ring_bsdf.inputs["Emission Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    ring_bsdf.inputs["Emission Strength"].default_value = 10.0
+elif "Emission" in ring_bsdf.inputs:
+    ring_bsdf.inputs["Emission"].default_value = (1.0, 1.0, 1.0, 1.0)
+    ring_bsdf.inputs["Emission Strength"].default_value = 10.0
+else:
+    # Use high emission through base color
+    ring_bsdf.inputs["Emission Strength"].default_value = 10.0 if "Emission Strength" in ring_bsdf.inputs else 0.0
+scene.render.filepath = str(out_dir / "mask_ring.png")
+bpy.ops.render.render(write_still=True)
+
+# Render inner mask: white inner volume on black background
+ring_obj.hide_render = True
+bg_plane_obj.hide_render = True
+inner_volume.hide_render = False
+inner_bsdf = inner_mat.node_tree.nodes["Principled BSDF"]
+inner_bsdf.inputs["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+if "Emission Color" in inner_bsdf.inputs:
+    inner_bsdf.inputs["Emission Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    inner_bsdf.inputs["Emission Strength"].default_value = 10.0
+elif "Emission" in inner_bsdf.inputs:
+    inner_bsdf.inputs["Emission"].default_value = (1.0, 1.0, 1.0, 1.0)
+    inner_bsdf.inputs["Emission Strength"].default_value = 10.0
+else:
+    inner_bsdf.inputs["Emission Strength"].default_value = 10.0 if "Emission Strength" in inner_bsdf.inputs else 0.0
+scene.render.filepath = str(out_dir / "mask_inner.png")
+bpy.ops.render.render(write_still=True)
+
+# Restore ring material
+ring_obj.hide_render = False
+ring_bsdf.inputs["Base Color"].default_value = ring_base_color
+ring_bsdf.inputs["Metallic"].default_value = ring_metallic
+if "Emission Color" in ring_bsdf.inputs:
+    ring_bsdf.inputs["Emission Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+    ring_bsdf.inputs["Emission Strength"].default_value = 0.0
+elif "Emission" in ring_bsdf.inputs:
+    ring_bsdf.inputs["Emission"].default_value = (0.0, 0.0, 0.0, 1.0)
+    ring_bsdf.inputs["Emission Strength"].default_value = 0.0
+else:
+    if "Emission Strength" in ring_bsdf.inputs:
+        ring_bsdf.inputs["Emission Strength"].default_value = 0.0
 
 # Convert masks to binary (0/255) - ensure they're properly formatted
 # This is handled by the compositor output, but we can verify
