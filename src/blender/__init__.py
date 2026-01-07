@@ -1,2 +1,0 @@
-# Blender rendering module
-

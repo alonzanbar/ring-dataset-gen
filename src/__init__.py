@@ -1,2 +1,0 @@
-# Ring dataset generator package
-

@@ -1,176 +1,186 @@
-# Ring Dataset Generator
+# Ring Dataset Generation
 
-A reproducible computer-rendered dataset generator for ring inner-diameter estimation. This tool uses Blender with Cycles rendering to generate synthetic ring images with corresponding masks and metadata.
+Generate a dataset of RGB images from a Blender scene with camera-only randomization.
+
+## Overview
+
+This tool generates a dataset of images from a Blender scene containing a ring object. The camera pose is randomized while ensuring the ring is always fully visible and properly framed. The tool supports two modes: **validate** (sampling and validation only) and **render** (full pipeline with image rendering and annotations). See `SPEC.md` for full requirements.
+
+## Quick Start
+
+### Basic Usage (Validate Mode)
+
+```bash
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py --
+```
+
+This will use default settings from `config.json` and validate 100 camera poses (no rendering).
+
+### Render Mode (Full Pipeline)
+
+```bash
+# Generate 10 images with rendering and annotations
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py -- \
+    --mode render \
+    --num-images 10 \
+    --seed 42 \
+    --output-dir output/my_dataset
+```
+
+### Validate Mode (No Rendering)
+
+```bash
+# Test camera sampling and validation without rendering
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py -- \
+    --mode validate \
+    --num-images 10 \
+    --seed 42
+```
+
+### Override Camera Settings
+
+```bash
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py -- \
+    --mode render \
+    --pitch-min 30 \
+    --pitch-max 60 \
+    --distance-min 15 \
+    --distance-max 30
+```
+
+### Use Custom Config File
+
+```bash
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py -- \
+    --mode render \
+    --config custom_config.json
+```
+
+## Modes
+
+The tool supports two operation modes:
+
+- **`validate`** (default): Samples and validates camera poses without rendering. Useful for testing camera sampling parameters and visibility constraints.
+- **`render`**: Full pipeline - samples poses, validates them, renders RGB images, and generates annotations. Use this mode to generate the actual dataset.
+
+## Configuration
+
+Default configuration is loaded from `config.json`. All parameters can be overridden via command-line arguments.
+
+### Key Parameters
+
+- `--mode`: Operation mode - `validate` or `render` (default: `validate`)
+- `--num-images`: Number of images/poses to generate (default: 100)
+- `--seed`: Random seed for reproducibility (default: None)
+- `--output-dir`: Output directory (default: output/dataset)
+- `--ring-object-name`: Name of ring object in scene (default: "ring")
+- `--pitch-min`, `--pitch-max`: Camera elevation range in degrees (default: 15-85)
+- `--distance-min`, `--distance-max`: Distance multipliers relative to ring size (default: 5-50)
+- `--image-width`, `--image-height`: Image dimensions (default: 1920x1080)
+- `--edge-margin`: Safety margin from image edges as fraction (default: 0.07)
+- `--min-projected-size`, `--max-projected-size`: Projected size fraction range (default: 0.20-0.35)
+- `--max-attempts`: Maximum attempts per sample before rejection (default: 50)
+
+See `--help` for full list of options:
+
+```bash
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py -- --help
+```
+
+## Output Structure
+
+### Render Mode Output
+
+```
+output/dataset/
+├── images/
+│   ├── 000000.png
+│   ├── 000001.png
+│   └── ...
+├── annotations.jsonl
+└── run_config.json
+```
+
+- **`images/`**: Rendered RGB images with deterministic naming (`000000.png`, `000001.png`, etc.)
+- **`annotations.jsonl`**: One JSON object per line containing:
+  - Image path (relative)
+  - Camera extrinsics (matrix_world, position, look_at)
+  - Camera intrinsics (width, height, format)
+  - Sampled parameters (yaw, pitch, distance, look_at_jitter)
+  - Visibility metrics (margin_used, projected_size_fraction, projected_bbox)
+  - Sample metadata (index, attempts)
+- **`run_config.json`**: Complete run configuration including:
+  - Effective config (all values used)
+  - Seed
+  - Blender version
+  - Ring object name
+
+### Validate Mode Output
+
+```
+output/dataset/
+└── run_config.json
+```
+
+Only `run_config.json` is written in validate mode (no images or annotations).
 
 ## Features
 
-- **Deterministic rendering**: Fixed configuration and seed produce identical outputs
-- **Parametric ring geometry**: Configurable inner diameter, band width, and thickness
-- **Multiple outputs per sample**:
-  - `rgb.png`: Rendered RGB image
-  - `mask_ring.png`: Binary mask of the ring body
-  - `mask_inner.png`: Binary mask of the inner hole area
-  - `meta.json`: Complete metadata including all parameters
-- **CPU-based rendering**: Ensures reproducibility (GPU may be non-deterministic)
+- **Camera Sampling**: Hemisphere-based sampling with configurable yaw, pitch, and distance ranges
+- **Visibility Validation**: Ensures ring is fully visible with margin and proper size constraints
+- **Auto-correction**: Automatically adjusts camera pose to satisfy visibility constraints
+- **Rejection Tracking**: Tracks and reports rejection reasons for diagnostics
+- **GPU Acceleration**: Automatic GPU detection and usage for faster rendering (falls back to CPU)
+- **Reproducibility**: Complete configuration tracking for exact reproduction of results
+
+## Testing
+
+### Quick Test (Validate Mode)
+
+```bash
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py -- \
+    --mode validate \
+    --num-images 5 \
+    --seed 42
+```
+
+### Full Test (Render Mode)
+
+```bash
+blender -b blender/ring_shader_pos1.blend -P tools/generate_ring_dataset.py -- \
+    --mode render \
+    --num-images 5 \
+    --seed 42 \
+    --output-dir output/test
+```
+
+### Test Render Pipeline Only
+
+```bash
+./test_render.sh
+```
 
 ## Requirements
 
-- Python 3.8+
-- Blender 3.0+ (headless installation)
-- Python dependencies: `numpy`, `pyyaml`, `pydantic`, `tqdm`
+- Blender 5.0+ (headless mode)
+- Python 3.x
+- See `SPEC.md` for detailed requirements
 
-## Installation
-
-1. **Install Blender**:
-   - **macOS**: Download from [blender.org](https://www.blender.org/download/) or use Homebrew: `brew install --cask blender`
-   - **Linux**: `sudo apt-get install blender` or download from blender.org
-   - **Windows**: Download installer from blender.org
-
-2. **Install Python dependencies**:
-   ```bash
-   pip install -e .
-   ```
-
-   Or install manually:
-   ```bash
-   pip install numpy pyyaml pydantic tqdm
-   ```
-
-3. **Set Blender path** (optional):
-   If Blender is not in your PATH, set the `BLENDER_PATH` environment variable:
-   ```bash
-   export BLENDER_PATH="/path/to/blender"
-   ```
-
-   On macOS, the default path is usually:
-   ```bash
-   export BLENDER_PATH="/Applications/Blender.app/Contents/MacOS/Blender"
-   ```
-
-## Usage
-
-### Basic Generation
-
-Generate samples for a dataset split:
-
-```bash
-python -m src.cli generate \
-    --config configs/mvp.yaml \
-    --out output \
-    --split train \
-    --count 100 \
-    --start-idx 0
-```
-
-### Command-Line Arguments
-
-- `--config`: Path to YAML configuration file (required)
-- `--out`: Output directory root (required)
-- `--split`: Dataset split name: `train`, `val`, or `test` (required)
-- `--count`: Number of samples to generate (required)
-- `--start-idx`: Starting sample index (default: 0)
-- `--blender-path`: Path to Blender executable (optional, auto-detected if not provided)
-
-### Configuration File
-
-The configuration file (`configs/mvp.yaml`) defines:
-
-- **Dataset settings**: Image dimensions, split sizes
-- **Seeds**: Base seed for deterministic generation
-- **Ring parameters**: Ranges for inner diameter, band width, thickness
-- **Camera parameters**: Focal length, distance, tilt, and rotation ranges
-- **Render settings**: Cycles samples, denoising, device (CPU/GPU)
-- **Lighting**: Area light configuration
-- **Background**: Plane material and size
-
-### Output Structure
+## Project Structure
 
 ```
-output/
-  train/
-    sample_000000/
-      rgb.png
-      mask_ring.png
-      mask_inner.png
-      meta.json
-    sample_000001/
-      ...
-  val/
-    ...
-  test/
-    ...
+ring-dataset-gen/
+├── datasetgen/          # Core modules
+│   ├── config.py        # Configuration management
+│   ├── scene_introspection.py  # Ring object analysis
+│   ├── camera_sampling.py      # Camera pose sampling
+│   ├── visibility_checks.py    # Visibility validation
+│   ├── render_pipeline.py      # RGB rendering
+│   └── annotations.py          # Annotation writing
+├── tools/
+│   └── generate_ring_dataset.py  # Main entrypoint
+├── config.json          # Default configuration
+├── SPEC.md             # Full specification
+└── README.md           # This file
 ```
-
-### Metadata Format
-
-Each `meta.json` contains:
-
-```json
-{
-  "sample_seed": 1234567890,
-  "ring": {
-    "inner_diameter_mm": 15.5,
-    "band_width_mm": 3.2,
-    "thickness_mm": 2.1
-  },
-  "camera": {
-    "focal_length_mm": 50.0,
-    "distance_mm": 200.0,
-    "tilt_x_deg": 5.0,
-    "tilt_y_deg": -10.0,
-    "rot_z_deg": 45.0
-  },
-  "lighting": {...},
-  "background": {...},
-  "render": {...},
-  "calibration": {
-    "mode": "none",
-    "marker_id": null,
-    "marker_size_mm": null,
-    "pixel_to_mm": null
-  },
-  "image_width": 512,
-  "image_height": 512
-}
-```
-
-## Determinism
-
-For fixed `(config, base_seed, sample_idx)`, re-running the generator produces:
-- **Identical** `meta.json` and masks
-- **Reproducible** RGB images when using CPU rendering (GPU may be non-deterministic)
-
-The seed strategy uses SHA-256 hashing:
-```
-sample_seed = stable_hash(base_seed, split_name, sample_idx)
-```
-
-This seed is used for:
-- NumPy random number generation (parameter sampling)
-- Blender Cycles rendering (`scene.cycles.seed`)
-
-## Notes
-
-- **CPU rendering**: Recommended for reproducibility. GPU rendering may produce slightly different results due to floating-point precision differences.
-- **Rendering time**: CPU rendering is slower but deterministic. Expect ~10-30 seconds per sample depending on cycle samples and image resolution.
-- **Calibration**: The calibration block in metadata is reserved for future pixel-to-mm conversion features.
-
-## Troubleshooting
-
-**Blender not found**:
-- Ensure Blender is installed and in PATH, or set `BLENDER_PATH` environment variable
-- Verify Blender works: `blender --version`
-
-**Rendering errors**:
-- Check that Blender version is 3.0 or higher
-- Verify all paths in configuration are valid
-- Check Blender console output for detailed error messages
-
-**Mask issues**:
-- Ensure object indices are properly set (ring=1, inner=2)
-- Verify compositor nodes are correctly configured
-
-## License
-
-This project is provided as-is for research and development purposes.
 
