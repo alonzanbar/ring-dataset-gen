@@ -87,3 +87,4 @@ If Blender still crashes:
 3. Try a stable Blender release instead of development build
 4. Run outside sandbox environment
 
+
